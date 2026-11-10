@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FreeCell</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+--bg:#1f5c3a;--card:#fbfaf5;--ink:#15181c;--red:#c0262d;--sel:#f5b800;--ui:rgba(0,0,0,.28);--uit:#fff;--slot:rgba(255,255,255,.25)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#10261a;--card:#e9e7de;--ui:rgba(255,255,255,.1)}}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--uit);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;min-height:100vh;user-select:none;-webkit-user-select:none}
+.wrap{max-width:720px;margin:0 auto;padding:8px 6px 10px}
+header{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+h1{font-size:17px;margin:0}
+.bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+button{background:var(--ui);color:var(--uit);border:1px solid rgba(255,255,255,.25);border-radius:8px;padding:6px 10px;font-size:14px;cursor:pointer}
+button:disabled{opacity:.4}
+#auto{background:#f5b800;color:#111;font-weight:700;border-color:#f5b800}
+button[hidden]{display:none}
+.stat{font-size:14px;opacity:.9;padding:0 2px}
+details{font-size:13px;opacity:.9;margin-bottom:6px;line-height:1.45}
+summary{cursor:pointer}
+.grid{display:grid;grid-template-columns:repeat(8,1fr);gap:5px;align-items:start}
+.top{margin-bottom:10px}
+.slot{position:relative;aspect-ratio:5/7;border:2px dashed var(--slot);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:clamp(11px,3.4vw,22px);color:var(--slot);font-weight:700}
+.col{position:relative;border-radius:6px}
+.col .slot{position:absolute;left:0;right:0}
+.card{container-type:inline-size;position:absolute;left:0;right:0;aspect-ratio:5/7;border-radius:6px;background:var(--card);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.4);font-weight:700;overflow:hidden;touch-action:none;cursor:grab}
+.card.rel{position:relative}
+.card.red{color:var(--red)}
+.card .r{position:absolute;top:2px;left:4px;font-size:var(--rfs,min(26cqw,22px));line-height:1;white-space:nowrap;letter-spacing:-.03em}
+.card .s{position:absolute;left:50%;top:54%;transform:translate(-50%,-50%);font-size:48cqw;line-height:1;opacity:.9}
+.card .s.f{font-size:64cqw;font-family:Georgia,'Times New Roman',serif;opacity:1}
+.card .ss{position:absolute;right:4px;bottom:3px;font-size:min(22cqw,18px);line-height:1}
+.card.sel{outline:3px solid var(--sel);z-index:50}
+.col.ok,.slot.ok,.card.ok{outline:2px dashed #8dffb0;outline-offset:2px}
+.ghost{position:fixed;z-index:999;pointer-events:none;opacity:.93}
+.ghost .card{box-shadow:0 6px 14px rgba(0,0,0,.5)}
+#msg{text-align:center;font-size:18px;font-weight:700;min-height:26px;margin-top:6px}
+</style></head><body><div class="wrap" id="wrap">
+<header><h1>♠ FreeCell</h1>
+<div class="bar"><span class="stat" id="stat"></span><button id="auto" hidden>Auto Complete</button><button id="undo">Undo</button><button id="reset">Reset</button><button id="new">New</button></div></header>
+<details><summary>How to play</summary>
+Move every card to the four foundations (top right), each built A → K in one suit. Free cells (top left) hold one card each. In the columns, place a card on a card one rank higher of the opposite colour (red on black, black on red). Several cards move together if they run down in order and alternate colours (like 8♥ 7♠ 6♦), as long as you have enough empty free cells and columns to make that move one card at a time: (empty cells + 1) × 2 per empty column. Any card or run can go in an empty column. Drag a card, or tap it and tap the destination (valid spots get a green outline). Tap a selected card again (or double-click it) to send it to its foundation, or to the first empty free cell if it can't go to a foundation.
+</details>
+<div class="grid top" id="top"></div>
+<div class="grid" id="cols"></div>
+<div id="msg"></div></div>
+<script>
+/* ---------- CONFIG ---------- */
+const SUITS={S:{sym:'♠',red:false},H:{sym:'♥',red:true},D:{sym:'♦',red:true},C:{sym:'♣',red:false}};
+const ORDER=['S','H','D','C'];       // foundation slot i belongs to suit ORDER[i]
+const CONFIG={
+  columns:8,
+  freeCells:4,
+  stackRule:'alternating', // how cards stack in columns: 'alternating' colours (classic) | 'sameSuit' | 'any'
+  classicMoveLimit:true,   // multi-card moves limited by free cells / empty columns
+  foundationPullback:false // true => foundation tops can be pulled back down
+};
+const Rules={
+  canStack(m,top){return !top||Rules.fits(m,top)},
+  fits(m,top){ // may card m sit directly on card top?
+    if(top.r!=m.r+1)return false;
+    const rule=CONFIG.stackRule;
+    if(rule=='alternating')return SUITS[m.suit].red!=SUITS[top.suit].red;
+    if(rule=='sameSuit')return m.suit==top.suit;
+    return true;
+  },
+  validRun(cards){ // every card must be able to sit on the one above it
+    for(let k=1;k<cards.length;k++)if(!Rules.fits(cards[k],cards[k-1]))return false;
+    return true;
+  }
+};
+const L=['','A','2','3','4','5','6','7','8','9','10','J','Q','K'];
+const $=id=>document.getElementById(id);
+let S,sel,hist,initial='',clicks=0,suppress=false,curUp=24;
+function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.random()*(i+1)|0;[a[i],a[j]]=[a[j],a[i]]}return a}
+function newGame(){
+  const deck=[];ORDER.forEach(s=>{for(let r=1;r<=13;r++)deck.push({suit:s,r})});
+  shuffle(deck);
+  S={cols:Array.from({length:CONFIG.columns},()=>[]),free:Array(CONFIG.freeCells).fill(null),found:ORDER.map(()=>[])};
+  deck.forEach((c,i)=>S.cols[i%CONFIG.columns].push(c));
+  initial=JSON.stringify(S);sel=null;hist=[];clicks=0;$('msg').textContent='';render();
+}
+const snap=()=>{hist.push(JSON.stringify(S));clicks++};
+function undo(){if(!hist.length||autoTimer)return;S=JSON.parse(hist.pop());clicks++;sel=null;$('msg').textContent='';render()}
+function selCards(s=sel){
+  if(!s)return[];
+  if(s.t=='col')return S.cols[s.c].slice(s.i);
+  if(s.t=='free')return S.free[s.k]?[S.free[s.k]]:[];
+  return S.found[s.f].slice(-1);
+}
+function removeSel(){
+  if(sel.t=='col')return S.cols[sel.c].splice(sel.i);
+  if(sel.t=='free'){const c=S.free[sel.k];S.free[sel.k]=null;return[c]}
+  return[S.found[sel.f].pop()];
+}
+function maxMove(toEmpty){
+  if(!CONFIG.classicMoveLimit)return 99;
+  const fr=S.free.filter(x=>!x).length;
+  let ec=S.cols.filter(c=>!c.length).length;if(toEmpty&&ec>0)ec--;
+  return (fr+1)*Math.pow(2,ec);
+}
+function colCheck(c){ // 'ok' | 'limit' | 'no'
+  const m=selCards();if(!m.length)return 'no';
+  if(sel.t=='col'&&sel.c==c)return 'no';
+  const col=S.cols[c],top=col[col.length-1];
+  if(!Rules.validRun(m)||!Rules.canStack(m[0],top))return 'no';
+  return m.length<=maxMove(!top)?'ok':'limit';
+}
+function canFree(k){return selCards().length==1&&!S.free[k]&&!(sel.t=='free'&&sel.k==k)}
+function canFound(f){
+  const m=selCards();if(m.length!=1)return false;
+  if(sel.t=='found'&&sel.f==f)return false;
+  return ORDER[f]==m[0].suit&&S.found[f].length+1==m[0].r;
+}
+function moveTo(kind,i){
+  snap();const cards=removeSel();
+  if(kind=='col')S.cols[i].push(...cards);
+  else if(kind=='free')S.free[i]=cards[0];
+  else S.found[i].push(cards[0]);
+  sel=null;
+}
+function tryDrop(kind,i){
+  if(kind=='col')return colCheck(i)=='ok'&&(moveTo('col',i),true);
+  if(kind=='free')return canFree(i)&&(moveTo('free',i),true);
+  return canFound(i)&&(moveTo('found',i),true);
+}
+function autoFound(){
+  const m=selCards();if(m.length!=1)return false;
+  const f=ORDER.indexOf(m[0].suit);
+  return canFound(f)&&(moveTo('found',f),true);
+}
+function flash(t){const m=$('msg');m.textContent=t;clearTimeout(flash.h);flash.h=setTimeout(()=>{if(!m.textContent.startsWith('🎉'))m.textContent=''},1600)}
+function autoFree(){ // send a single selected card to the first empty free cell (top left)
+  const m=selCards();if(m.length!=1||sel.t=='free')return false;
+  const k=S.free.findIndex(x=>!x);if(k<0)return false;
+  moveTo('free',k);return true;
+}
+function sameSel(a,b){return a&&b&&a.t==b.t&&a.c==b.c&&a.i==b.i&&a.k==b.k&&a.f==b.f}
+function tap(n){ // n={t:'col',c,i}|{t:'free',k}|{t:'found',f}
+  if(suppress||autoTimer)return;
+  if(sel&&!sameSel(sel,n)){
+    if(n.t=='col'){
+      const r=colCheck(n.c);
+      if(r=='ok'){moveTo('col',n.c);return finish()}
+      if(r=='limit'){flash('Not enough free cells or empty columns for that many cards');return finish()}
+    }else if(tryDrop(n.t,n.t=='free'?n.k:n.f))return finish();
+  }
+  if(sameSel(sel,n)){if(!autoFound()&&!autoFree())sel=null;return finish()}
+  let ok=false;
+  if(n.t=='col')ok=n.i>=0&&Rules.validRun(S.cols[n.c].slice(n.i));
+  if(n.t=='free')ok=!!S.free[n.k];
+  if(n.t=='found')ok=CONFIG.foundationPullback&&S.found[n.f].length>0;
+  const had=sel;sel=ok?n:null;
+  if(had&&!ok&&!sameSel(had,n))flash("Can't move there");
+  finish();
+}
+function finish(){render();
+  if(S.found.reduce((a,f)=>a+f.length,0)==52)$('msg').textContent='🎉 All suits complete in '+clicks+' clicks!';
+}
+/* ---------- Rendering ---------- */
+function cardEl(c,extra=''){
+  const d=document.createElement('div');
+  d.className='card'+(SUITS[c.suit].red?' red':'')+extra;
+  const sy=SUITS[c.suit].sym,face=c.r>10;
+  d.innerHTML=`<span class="r">${L[c.r]}${sy}</span><span class="s${face?' f':''}">${face?L[c.r]:sy}</span>`+(face?`<span class="ss">${sy}</span>`:'');
+  return d;
+}
+function slotEl(txt=''){const d=document.createElement('div');d.className='slot';d.textContent=txt;return d}
+function buildTop(){
+  const T=$('top');T.innerHTML='';
+  S.free.forEach((c,k)=>{
+    let el=c?cardEl(c,' rel'+(sel&&sel.t=='free'&&sel.k==k?' sel':'')):slotEl();
+    el.dataset.free=k;if(c)el.dataset.n=JSON.stringify({t:'free',k});
+    if(sel&&canFree(k))el.classList.add('ok');
+    el.onclick=()=>tap({t:'free',k});T.appendChild(el);
+  });
+  S.found.forEach((f,i)=>{
+    const top=f[f.length-1];
+    let el=top?cardEl(top,' rel'+(sel&&sel.t=='found'&&sel.f==i?' sel':'')):slotEl(SUITS[ORDER[i]].sym);
+    el.dataset.found=i;if(top&&CONFIG.foundationPullback)el.dataset.n=JSON.stringify({t:'found',f:i});
+    if(sel&&canFound(i))el.classList.add('ok');
+    el.onclick=()=>tap({t:'found',f:i});T.appendChild(el);
+  });
+}
+function render(){
+  const VH=innerHeight||800,wrap=$('wrap'),GAP=5,N=CONFIG.columns;
+  buildTop();
+  const CL=$('cols');CL.innerHTML='';
+  // choose a card size so the longest column keeps readable rank strips without scrolling
+  let wm=Math.min(720,innerWidth||720),w,h,upB,sc=1;
+  for(let it=0;it<14;it++){
+    wrap.style.maxWidth=wm+'px';
+    w=(CL.clientWidth-GAP*(N-1))/N||40;h=w*1.4;
+    upB=Math.max(18,w*.36);
+    const room=Math.max(0,VH-(CL.getBoundingClientRect().top+scrollY)-h-56);
+    sc=1;
+    S.cols.forEach(a=>{const g=(a.length-1)*upB;if(g>0)sc=Math.min(sc,room/g)});
+    if(upB*sc>=17||wm<=320)break;
+    wm=Math.max(320,wm*.94);
+  }
+  const up=Math.max(12,upB*sc),norm=Math.min(.26*w,22);curUp=up;
+  S.cols.forEach((a,c)=>{
+    const el=document.createElement('div');el.className='col';
+    let y=0,last=0;
+    if(!a.length){const s=slotEl();s.style.top='0';el.appendChild(s)}
+    a.forEach((card,i)=>{
+      const d=cardEl(card,sel&&sel.t=='col'&&sel.c==c&&i>=sel.i?' sel':'');
+      d.style.top=y+'px';d.dataset.n=JSON.stringify({t:'col',c,i});
+      if(i<a.length-1)d.style.setProperty('--rfs',Math.min(norm,Math.max(9,up-4))+'px');
+      d.onclick=e=>{e.stopPropagation();tap({t:'col',c,i})};
+      el.appendChild(d);last=y;y+=up;
+    });
+    el.style.height=(a.length?last+h:h)+'px';
+    el.dataset.col=c;if(sel&&colCheck(c)=='ok')el.classList.add('ok');
+    el.onclick=()=>tap({t:'col',c,i:-1});CL.appendChild(el);
+  });
+  $('stat').textContent=S.found.reduce((a,f)=>a+f.length,0)+'/52 · '+clicks+' clicks';
+  $('undo').disabled=!hist.length||!!autoTimer;$('reset').disabled=!hist.length||!!autoTimer;
+  $('auto').hidden=!autoReady();
+}
+/* ---------- Drag & drop (taps still work) ---------- */
+let drag=null,ghost=null;
+function validStart(n){
+  if(n.t=='col')return Rules.validRun(S.cols[n.c].slice(n.i));
+  if(n.t=='free')return !!S.free[n.k];
+  return CONFIG.foundationPullback&&S.found[n.f].length>0;
+}
+document.addEventListener('pointerdown',e=>{
+  if(e.button>0||autoTimer)return;
+  const el=e.target.closest('.card[data-n]');if(!el)return;
+  const n=JSON.parse(el.dataset.n);if(!validStart(n))return;
+  const r=el.getBoundingClientRect();
+  drag={n,x:e.clientX,y:e.clientY,ox:e.clientX-r.left,oy:e.clientY-r.top,w:r.width,go:false};
+});
+document.addEventListener('pointermove',e=>{
+  if(!drag)return;
+  if(!drag.go){
+    if(Math.hypot(e.clientX-drag.x,e.clientY-drag.y)<6)return;
+    drag.go=true;sel=drag.n;
+    try{document.body.setPointerCapture(e.pointerId)}catch(_){}
+    ghost=document.createElement('div');ghost.className='ghost';ghost.style.width=drag.w+'px';
+    const step=Math.max(16,Math.min(curUp,drag.w*.4));
+    selCards().forEach((c,k)=>{const d=cardEl(c);d.style.top=k*step+'px';ghost.appendChild(d)});
+    document.body.appendChild(ghost);render();
+  }
+  ghost.style.left=(e.clientX-drag.ox)+'px';ghost.style.top=(e.clientY-drag.oy)+'px';
+});
+function endDrag(e,cancel){
+  if(!drag)return;
+  const d=drag;drag=null;
+  if(!d.go)return;
+  if(ghost){ghost.remove();ghost=null}
+  suppress=true;setTimeout(()=>suppress=false,60);
+  let ok=false,same=false,limit=false;
+  if(!cancel){
+    const t=document.elementFromPoint(e.clientX,e.clientY);
+    const col=t&&t.closest('[data-col]'),fr=t&&t.closest('[data-free]'),fd=t&&t.closest('[data-found]');
+    if(col){const c=+col.dataset.col;same=d.n.t=='col'&&d.n.c==c;limit=colCheck(c)=='limit';ok=tryDrop('col',c)}
+    else if(fr)ok=tryDrop('free',+fr.dataset.free);
+    else if(fd)ok=tryDrop('found',+fd.dataset.found);
+  }
+  if(!ok){sel=null;if(!cancel&&!same)flash(limit?'Not enough free cells or empty columns for that many cards':"Can't move there")}
+  finish();
+}
+addEventListener('pointerup',e=>endDrag(e,false));
+addEventListener('pointercancel',e=>endDrag(e,true));
+/* ---------- Auto Complete ---------- */
+// Available once every column is in descending order (largest on top, smallest at the bottom).
+// From there the lowest remaining card is always reachable, so everything can go to the foundations.
+let autoTimer=null;
+const foundTotal=()=>S.found.reduce((a,f)=>a+f.length,0);
+function colsDescending(){return S.cols.every(c=>c.every((x,k)=>k==0||c[k-1].r>x.r))}
+function autoReady(){return !autoTimer&&foundTotal()<52&&colsDescending()}
+function autoStep(){
+  let best=null;
+  const consider=(card,src)=>{const f=ORDER.indexOf(card.suit);if(S.found[f].length+1==card.r&&(!best||card.r<best.card.r))best={card,src,f}};
+  S.free.forEach((c,k)=>c&&consider(c,{t:'free',k}));
+  S.cols.forEach((col,c)=>col.length&&consider(col[col.length-1],{t:'col',c}));
+  if(!best)return false;
+  if(best.src.t=='free')S.free[best.src.k]=null;else S.cols[best.src.c].pop();
+  S.found[best.f].push(best.card);return true;
+}
+function autoComplete(){
+  if(!autoReady())return;
+  snap();sel=null; // the whole auto-complete counts as one click and one undo step
+  autoTimer=setInterval(()=>{
+    const ok=autoStep();
+    if(!ok||foundTotal()==52){clearInterval(autoTimer);autoTimer=null;finish()}else render();
+  },110);
+  render();
+}
+/* ---------- Buttons ---------- */
+$('auto').onclick=autoComplete;
+$('undo').onclick=undo;
+let rArmed=0,nArmed=0;
+$('reset').onclick=()=>{
+  if(!hist.length||autoTimer)return;
+  if(rArmed){rArmed=0;$('reset').textContent='Reset';S=JSON.parse(initial);sel=null;hist=[];clicks=0;$('msg').textContent='';render();return}
+  rArmed=1;$('reset').textContent='Sure?';setTimeout(()=>{rArmed=0;$('reset').textContent='Reset'},2000);
+};
+$('new').onclick=()=>{
+  if(autoTimer)return;
+  if(!hist.length||nArmed){nArmed=0;$('new').textContent='New';newGame();return}
+  nArmed=1;$('new').textContent='Sure?';setTimeout(()=>{nArmed=0;$('new').textContent='New'},2000);
+};
+addEventListener('resize',render);
+newGame();
+</script></body></html>
